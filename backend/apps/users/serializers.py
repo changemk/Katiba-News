@@ -1,13 +1,15 @@
 from rest_framework import serializers
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.contrib.auth.models import Group
+from django.db import transaction
+from .access import READER
 
-from .models import AuthorProfile, User
+from .models import User
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(
-        write_only=True,
-        min_length=8,
-    )
+    password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
 
     class Meta:
         model = User
@@ -17,86 +19,50 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             "password",
             "first_name",
             "last_name",
+            "role",
         )
 
+    def validate_role(self, role):
+        # Newsroom privileges are granted by administrators, never public signup.
+        if role != User.Role.READER:
+            raise serializers.ValidationError('Newsroom roles must be assigned by an administrator.')
+        return role
+
+    def validate(self, attrs):
+        candidate = User(**{key: value for key, value in attrs.items() if key != 'password'})
+        try:
+            validate_password(attrs['password'], candidate)
+        except ValidationError as exc:
+            raise serializers.ValidationError({'password': exc.messages})
+        return attrs
+
+    @transaction.atomic
     def create(self, validated_data):
-        return User.create(validated_data)
+        password = validated_data.pop("password")
+        validated_data["role"] = User.Role.READER
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        user.groups.add(Group.objects.get_or_create(name=READER)[0])
+        return user
 
 
 class UserSerializer(serializers.ModelSerializer):
-    profile_complete = serializers.SerializerMethodField()
+    groups = serializers.SlugRelatedField(many=True, read_only=True, slug_field='name')
+    permissions = serializers.SerializerMethodField()
+
+    def get_permissions(self, user):
+        return sorted(user.get_all_permissions()) if user.is_active else []
 
     class Meta:
         model = User
         fields = (
+            "groups",
+            "permissions",
             "id",
             "username",
             "email",
             "first_name",
             "last_name",
             "role",
-            "profile_complete",
         )
-
-    def get_profile_complete(self, user):
-        try:
-            return user.author_profile.onboarding_complete
-        except AuthorProfile.DoesNotExist:
-            return False
-
-
-class AuthorProfileSerializer(serializers.ModelSerializer):
-
-    class Meta:
-
-        model = AuthorProfile
-
-        fields = (
-            # Basic author information
-            "professional_title",
-            "preferred_byline",
-            "organisation",
-            "location",
-            "phone_number",
-
-            # Professional background
-            "years_of_experience",
-            "highest_education",
-            "journalism_training",
-            "previous_media_experience",
-
-            # Portfolio and professional profiles
-            "portfolio_url",
-            "linkedin_url",
-            "published_work",
-
-            # Expertise
-            "primary_expertise",
-            "secondary_expertise",
-            "reporting_beats",
-            "content_types",
-            "languages",
-            "geographic_coverage",
-
-            # Writing and reporting experience
-            "writing_experience",
-            "investigative_experience",
-            "fact_checking_experience",
-            "source_verification_experience",
-
-            # Katiba News interests
-            "topics_of_interest",
-            "motivation_to_join",
-
-            # Professional and editorial information
-            "conflicts_of_interest",
-            "editorial_standards_agreement",
-            "additional_information",
-
-            # Existing fields
-            "areas_of_expertise",
-            "biography",
-            "onboarding_complete",
-        )
-
-        read_only_fields = ("onboarding_complete",)

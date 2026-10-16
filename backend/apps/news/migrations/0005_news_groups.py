@@ -1,4 +1,3 @@
-"""Seed newsroom groups and translate legacy roles into initial memberships."""
 from django.db import migrations
 
 

@@ -7,9 +7,6 @@ from pathlib import Path
 
 def main():
     """Run administrative tasks."""
-<<<<<<< HEAD
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.config.settings')
-=======
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'katiba_news.settings')
     
     # FIX: Explicitly add the backend folder and its nested 'apps' folder to Python's system search path
@@ -17,7 +14,6 @@ def main():
     sys.path.append(str(BASE_DIR))
     sys.path.append(str(BASE_DIR / 'apps'))
 
->>>>>>> origin/develop
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

@@ -1,11 +1,10 @@
 from django.urls import path
-from .views import ArticleListCreateAPIView, ArticleDetailView
+from .views import ArticleListCreateView, ArticleDetailView
 
-# Sub-paths isolated under the app level scope
 urlpatterns = [
-    # Handles collection queries and fresh form post inputs
-    path("", ArticleListCreateAPIView.as_view(), name="article-list-create"),
+    # Matches: GET /api/articles/ and POST /api/articles/
+    path("", ArticleListCreateView.as_view(), name="article-list-create"),
     
-    # Handles explicit single item lookup interactions based on URL slugs
+    # Matches: GET, PUT, PATCH, DELETE /api/articles/<slug>/
     path("<slug:slug>/", ArticleDetailView.as_view(), name="article-detail"),
 ]

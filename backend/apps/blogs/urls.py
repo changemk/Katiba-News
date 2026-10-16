@@ -1,16 +1,21 @@
 from django.urls import path
-from .views import BlogPostListCreateAPIView, BlogPostDetailAPIView, CommentListCreateAPIView, LikeToggleAPIView
+from .views import (
+    BlogPostListCreateAPIView, 
+    BlogPostDetailAPIView, 
+    CommentListCreateAPIView, 
+    LikeToggleAPIView
+)
 
 urlpatterns = [
-    # Timeline overview channels and core opinion setups
+    # Matches: GET /api/blogs/ and POST /api/blogs/
     path("", BlogPostListCreateAPIView.as_view(), name="blog-list-create"),
     
-    # Detail analysis parameters matching slugs
+    # Matches: GET, PUT, PATCH, DELETE /api/blogs/<slug>/
     path("<slug:slug>/", BlogPostDetailAPIView.as_view(), name="blog-detail"),
     
-    # Isolated nested path tracking for comment lists
+    # Matches: GET /api/blogs/<slug>/comments/ and POST /api/blogs/<slug>/comments/
     path("<slug:slug>/comments/", CommentListCreateAPIView.as_view(), name="blog-comment-list-create"),
     
-    # Action route for engagement metrics triggers
+    # Matches: POST /api/blogs/<slug>/like/
     path("<slug:slug>/like/", LikeToggleAPIView.as_view(), name="blog-like-toggle"),
 ]

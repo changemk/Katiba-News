@@ -1,114 +1,155 @@
-"""Collected leads, news categories, and author/editor submissions."""
-import uuid
+"""Source collection state, editorial leads, and immutable-by-convention snapshots."""
 from django.conf import settings
-from django.core.files.storage import FileSystemStorage
-from django.db import models, transaction
-from django.db.models.signals import post_delete
-from django.dispatch import receiver
+from django.core.exceptions import ValidationError
+from django.db import models
 
 
-class Lead(models.Model):
-    """Store collected source metadata and its editorial selection status."""
-    class Status(models.TextChoices):
-        """Define the review states available for a collected lead."""
-        NEW = 'new', 'New'
-        SELECTED = 'selected', 'Selected'
-        DISMISSED = 'dismissed', 'Dismissed'
-
-    # Kenya Law's Atom ID is stable across repeated collections.
-    external_id = models.CharField(max_length=1000, unique=True)
-    title = models.TextField()
-    original_url = models.URLField(max_length=1000)
-    # Publication time comes from the feed; discovery time records our first import.
-    published_at = models.DateTimeField(null=True, blank=True)
-    discovered_at = models.DateTimeField(auto_now_add=True)
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.NEW)
-
-    class Meta:
-        # The ID breaks timestamp ties so paginated results have stable ordering.
-        ordering = ['-discovered_at', '-pk']
-        # Keep the legacy grant used by the users app's Author membership check.
-        # It does not expose any assignment endpoints in this MVP.
-        permissions = [('review_lead', 'Select or dismiss source leads'),
-                       ('view_assigned_lead', 'View own assigned source leads')]
+class Source(models.Model):
+    """One publisher feed and its persisted polling/backoff state."""
+    slug = models.SlugField(unique=True)
+    name = models.CharField(max_length=200)
+    feed_url = models.URLField(max_length=1000)
+    enabled = models.BooleanField(default=True)
+    interval_minutes = models.PositiveIntegerField(default=60)
+    last_attempt = models.DateTimeField(null=True, blank=True)
+    last_success = models.DateTimeField(null=True, blank=True)
+    next_check = models.DateTimeField(null=True, blank=True)
+    failures = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    etag = models.CharField(max_length=500, blank=True)
+    last_modified = models.CharField(max_length=200, blank=True)
 
     def __str__(self):
-        """Display the source headline in admin and model selections."""
-        return self.title
-
-
-class Category(models.Model):
-    """Group news stories under a unique subject name."""
-    name = models.CharField(max_length=100, unique=True)
-
-    class Meta:
-        ordering = ['name']
-        verbose_name_plural = 'categories'
-
-    def __str__(self):
-        """Display the category name in forms and admin."""
         return self.name
 
 
-def news_image_storage():
-    """Resolve private upload storage from the project location on each installation."""
-    return FileSystemStorage(location=settings.BASE_DIR / 'news_uploads')
-
-
-class NewsImage(models.Model):
-    """Store a validated newsroom image, private to its uploader or linked story."""
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
-                                    related_name='news_images')
-    story = models.ForeignKey('Story', null=True, blank=True, on_delete=models.CASCADE,
-                              related_name='images')
-    file = models.FileField(storage=news_image_storage)
-    content_type = models.CharField(max_length=30)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    @property
-    def api_url(self):
-        """Serve image bytes through the authenticated news API, never a public media URL."""
-        return f'/api/news/images/{self.pk}/'
-
-
-class Story(models.Model):
-    """Store an author-owned story and its submission and review details."""
+class Lead(models.Model):
+    """A source item plus editorial decisions that collection must preserve."""
     class Status(models.TextChoices):
-        """Define the draft, submission, and editorial decision states."""
-        DRAFT = 'draft', 'Draft'
-        SUBMITTED = 'submitted', 'Submitted'
-        APPROVED = 'approved', 'Approved'
-        REJECTED = 'rejected', 'Rejected'
+        NEW = 'new', 'New'
+        SELECTED = 'selected', 'Selected'
+        ASSIGNED = 'assigned', 'Assigned'
+        DISMISSED = 'dismissed', 'Dismissed'
 
-    title = models.CharField(max_length=255)
-    content = models.TextField()
-    category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='stories')
-    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='news_stories')
-    status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
-    featured_image = models.ForeignKey(NewsImage, null=True, blank=True, on_delete=models.SET_NULL,
-                                       related_name='featured_in')
-    featured_image_alt = models.CharField(max_length=300, blank=True)
-    featured_image_caption = models.CharField(max_length=500, blank=True)
-    feedback = models.TextField(blank=True)
-    reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
-                                 related_name='reviewed_news_stories')
-    submitted_at = models.DateTimeField(null=True, blank=True)
-    reviewed_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    source = models.ForeignKey(Source, on_delete=models.PROTECT)
+    external_id = models.CharField(max_length=1000)
+    title = models.TextField()
+    original_url = models.URLField(max_length=1000)
+    published_at = models.DateTimeField(null=True, blank=True)
+    source_updated_at = models.DateTimeField(null=True, blank=True)
+    discovered_at = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField()
+    fingerprint = models.CharField(max_length=64)
+    has_update = models.BooleanField(default=False)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.NEW)
+    topic_matches = models.JSONField(default=list, blank=True, help_text='Automatic topic hints; editors must verify relevance.')
+    relevance = models.CharField(max_length=12, default='unreviewed', choices=[
+        ('unreviewed', 'Unreviewed'), ('relevant', 'Relevant'), ('irrelevant', 'Irrelevant')])
+    relevance_reason = models.TextField(blank=True)
+    story_group = models.ForeignKey('StoryGroup', null=True, blank=True,
+                                    on_delete=models.SET_NULL, related_name='leads')
+    tags = models.CharField(max_length=500, blank=True, help_text='Editor-managed topic tags')
+    notes = models.TextField(blank=True)
+    brief = models.TextField(blank=True)
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, limit_choices_to={'groups__name': 'Author', 'is_active': True})
 
     class Meta:
-        ordering = ['-updated_at', '-pk']
+        permissions = [
+            ('view_assigned_lead', 'View own assigned source leads'),
+            ('review_lead', 'Review source leads and relevance'),
+            ('assign_lead', 'Assign source leads to authors'),
+            ('group_lead', 'Group related source coverage'),
+        ]
+        ordering = ['-discovered_at']
+        constraints = [models.UniqueConstraint(fields=['source', 'external_id'], name='news_external_identity')]
+
+    def clean(self):
+        """Validate editorial assignments in admin and API validation paths.
+
+        Django save() does not call this automatically; other writers must call
+        full_clean() before persisting editorial changes.
+        """
+        from apps.users.access import eligible_author
+        if self.assigned_to_id and not eligible_author(self.assigned_to):
+            raise ValidationError({'assigned_to': 'Choose an active member of the Author group with assignment access.'})
+        if self.status == self.Status.ASSIGNED and (not self.assigned_to_id or not self.brief.strip()):
+            raise ValidationError('Assigned leads require an author and a reporting brief.')
+
+    @property
+    def needs_reassignment(self):
+        # Derived live: removing Author membership or deactivating an account
+        # revokes access immediately while preserving the previous assignment.
+        from apps.users.access import eligible_author
+        return self.status == self.Status.ASSIGNED and (
+            not self.assigned_to_id or not eligible_author(self.assigned_to))
 
     def __str__(self):
-        """Display the story headline in admin and model selections."""
         return self.title
 
 
-@receiver(post_delete, sender=NewsImage)
-def remove_news_image_file(sender, instance, **kwargs):
-    """Remove uploaded bytes after deletion commits, including deleted story images."""
-    storage, name = instance.file.storage, instance.file.name
-    if name:
-        transaction.on_commit(lambda: storage.delete(name), using=kwargs.get('using'))
+class LeadRevision(models.Model):
+    """Snapshot created on first capture and each source-metadata change."""
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='revisions')
+    captured_at = models.DateTimeField(auto_now_add=True)
+    fingerprint = models.CharField(max_length=64)
+    metadata = models.JSONField()
+
+    class Meta:
+        ordering = ['-captured_at']
+
+
+class StoryGroup(models.Model):
+    """Editor-confirmed related coverage; each lead keeps its own attribution."""
+    title = models.CharField(max_length=500)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.title
+
+
+class EditorialEvent(models.Model):
+    """Append-only through app interfaces; source revisions remain separate."""
+    lead = models.ForeignKey(Lead, on_delete=models.PROTECT, related_name='editorial_events')
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    actor_name = models.CharField(max_length=150)
+    action = models.CharField(max_length=40)
+    changes = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-pk']
+
+
+class TopicRule(models.Model):
+    """An explicitly approved phrase derived from editorial feedback, not automatic training."""
+    phrase = models.CharField(max_length=120, unique=True)
+    topic = models.CharField(max_length=60)
+    enabled = models.BooleanField(default=True)
+    rationale = models.TextField()
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.topic}: {self.phrase}'
+
+
+class CollectionAlert(models.Model):
+    """Local collection alert; no email or other outbound notification is sent."""
+    source = models.ForeignKey(Source, on_delete=models.CASCADE, related_name='alerts')
+    kind = models.CharField(max_length=20, choices=[('failures', 'Repeated failures'), ('overdue', 'Missed check')])
+    message = models.TextField()
+    opened_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['source', 'kind'],
+            condition=models.Q(resolved_at__isnull=True), name='news_one_open_alert')]
+
+
+class SchedulerState(models.Model):
+    """Persisted heartbeat for scheduled invocations and backend health checks."""
+    name = models.CharField(max_length=40, primary_key=True, default='sources')
+    last_started = models.DateTimeField(null=True)
+    last_finished = models.DateTimeField(null=True)
+    last_error = models.TextField(blank=True)

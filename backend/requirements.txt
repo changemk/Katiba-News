@@ -1,9 +1,0 @@
-# Shared Django backend dependencies (users and news).
-# From the repository root: python -m pip install -r backend/requirements.txt
-Django>=5.2,<5.3
-djangorestframework>=3.16,<4
-djangorestframework-simplejwt>=5.5,<6
-defusedxml>=0.7.1,<0.8
-# News image validation and rich-text sanitization.
-Pillow>=11.3,<13
-bleach>=6.4,<7

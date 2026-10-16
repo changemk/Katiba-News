@@ -6,5 +6,3 @@ __pycache__/
 !.env.example
 .venv/
 venv/
-backend/news_uploads/
-node_modules/
